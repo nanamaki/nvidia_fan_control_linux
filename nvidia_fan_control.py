@@ -1,6 +1,7 @@
 import time
 from pynvml import *
 import os
+import signal
 
 # Fan curve parameters
 temperature_points = [0, 40, 57, 70]
@@ -122,8 +123,18 @@ def print_info(info):
 
 # Main loop
 last_lines = 0
+terminate = False
+
+# Handler to terminate main loop
+def signal_handler(sig, frame):
+    global terminate
+    terminate = True
+
+# Register signal handler to gracefully shutdown
+signal.signal(signal.SIGTERM, signal_handler)
+
 try:
-    while True:
+    while not terminate:
         for handle, fan_count in zip(handles, fan_counts):
             # get the temperature
             temperature = nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU)
