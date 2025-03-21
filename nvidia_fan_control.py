@@ -1,11 +1,15 @@
+import sys
+sys.dont_write_bytecode = True
+import win_graceful_shutdown
 import time
+import atexit
 from pynvml import *
-import os
-import signal
 
 # Fan curve parameters
 temperature_points = [0, 40, 57, 70]
-fan_speed_points = [27, 40, 80, 100]
+#fan_speed_points = [27, 40, 80, 100]
+#fan_speed_points = [80, 80, 80, 100]
+fan_speed_points = [25, 25, 60, 100]
 
 # GPU selection for fan curve application
 # Specify which GPUs to control by their indices
@@ -121,49 +125,49 @@ def print_info(info):
         print(line)
     return len(lines)
 
+def cleanup():
+    # reset to auto fan control
+    for handle, fan_count in zip(handles, fan_counts):
+        for i in range(fan_count):
+            nvmlDeviceSetDefaultFanSpeed_v2(handle, i)
+    nvmlShutdown()
+
 # Main loop
 last_lines = 0
-terminate = False
 
-# Handler to terminate main loop
-def signal_handler(sig, frame):
-    global terminate
-    terminate = True
+# set cleanup for handling graceful shutdown
+atexit.register(cleanup)
 
-# Register signal handler to gracefully shutdown
-signal.signal(signal.SIGTERM, signal_handler)
+while True:
+    for handle, fan_count in zip(handles, fan_counts):
+        # get the temperature
+        temperature = nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU)
+        if temperature is None:
+            exit(1)
 
-try:
-    while not terminate:
-        for handle, fan_count in zip(handles, fan_counts):
-            # get the temperature
-            temperature = nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU)
-            if temperature is None:
-                exit(1)
+        # change fan speed if temperature is lower than step down or higher than previous 
+        if temperature < step_down_temperature or temperature > previous_temperature:
+            # calculate the point of the fan curve (temperature and fan speed arrays)
+            point = 0
+            while point < num_total_curve_point - 1 and temperature >= temperature_points[point + 1]:
+                point += 1
 
-            # change fan speed if temperature is lower than step down or higher than previous 
-            if temperature < step_down_temperature or temperature > previous_temperature:
-                # calculate the point of the fan curve (temperature and fan speed arrays)
-                point = 0
-                while point < num_total_curve_point - 1 and temperature >= temperature_points[point + 1]:
-                    point += 1
+            previous_point = max(0, point)
+            next_point = min(num_total_curve_point - 1, point + 1)
 
-                previous_point = max(0, point)
-                next_point = min(num_total_curve_point - 1, point + 1)
+            # logic for the fan speed incremental variation (instead of a stepped fan curve)
+            temperature_delta = temperature_points[next_point] - temperature_points[previous_point]
+            fan_speed_delta = fan_speed_points[next_point] - fan_speed_points[previous_point]
+            temperature_increment = temperature - temperature_points[previous_point]
+            fan_speed_increment = fan_speed_delta * temperature_increment / temperature_delta if temperature_delta != 0 else 0
+            previous_temperature = temperature
+            step_down_temperature = temperature - temperature_hysteresis
 
-                # logic for the fan speed incremental variation (instead of a stepped fan curve)
-                temperature_delta = temperature_points[next_point] - temperature_points[previous_point]
-                fan_speed_delta = fan_speed_points[next_point] - fan_speed_points[previous_point]
-                temperature_increment = temperature - temperature_points[previous_point]
-                fan_speed_increment = fan_speed_delta * temperature_increment / temperature_delta if temperature_delta != 0 else 0
-                previous_temperature = temperature
-                step_down_temperature = temperature - temperature_hysteresis
+            # calculate the total fan speed
+            fan_speed = round(fan_speed_points[previous_point] + fan_speed_increment)
 
-                # calculate the total fan speed
-                fan_speed = round(fan_speed_points[previous_point] + fan_speed_increment)
-
-                # Prepare information to be printed
-                info = f"""============================================================
+            # Prepare information to be printed
+            info = f"""============================================================
 Temperature: {temperature}°C
 Total Curve Point: {num_total_curve_point}
 Current Curve Point: {point}
@@ -179,25 +183,19 @@ Previous_Temperature: {previous_temperature}°C
 Step_Down_Temperature: {step_down_temperature}
 ============================================================"""
 
-                # Clear previous output
-                if last_lines > 0:
-                    clear_lines(last_lines)
+            # Clear previous output
+            if last_lines > 0:
+                clear_lines(last_lines)
 
-                # Print new information and record number of lines
-                last_lines = print_info(info)
+            # Print new information and record number of lines
+            last_lines = print_info(info)
 
-                # set the fan speed if different from previous fan speed (setting fan speed is expensive!)
-                if fan_speed != setted_fan_speed:
-                    for i in range(fan_count):
-                        nvmlDeviceSetFanSpeed_v2(handle, i, fan_speed)
-                    # save the new setted_fan_speed
-                    setted_fan_speed = fan_speed
+            # set the fan speed if different from previous fan speed (setting fan speed is expensive!)
+            if fan_speed != setted_fan_speed:
+                for i in range(fan_count):
+                    nvmlDeviceSetFanSpeed_v2(handle, i, fan_speed)
+                # save the new setted_fan_speed
+                setted_fan_speed = fan_speed
 
-        # wait some second before resuming the program
-        time.sleep(sleep_seconds)
-finally:
-    # reset to auto fan control
-    for handle, fan_count in zip(handles, fan_counts):
-        for i in range(fan_count):
-            nvmlDeviceSetDefaultFanSpeed_v2(handle, i)
-    nvmlShutdown()
+    # wait some second before resuming the program
+    time.sleep(sleep_seconds)
